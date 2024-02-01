@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      href="https://cdn.jsdelivr.net/npm/modern-normalize@2.0.0/modern-normalize.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        margin: auto;
+        max-width: 768px;
+      }
+
+      pre {
+        min-height: 10lh;
+        max-height: 30em;
+        border: 0.1em dotted;
+        overflow-x: scroll;
+      }
+
+      textarea,
+      #jwt,
+      #access-token,
+      #url {
+        width: 100%;
+        font-family: monospace;
+      }
+    </style>
+    <script type="module">
+      // It's not really possible to make this script external when running locally.
+      //
+      // If we access this via `file:///`, then the script cannot be loaded because
+      // it's an ES Module: https://stackoverflow.com/a/52919513/5719930.
+      //
+      // If we instead spin up an HTTP server and access it that way, then key signing
+      // will fail with a cryptic error:
+      // https://github.com/WalletConnect/walletconnect-monorepo/issues/689#issuecomment-1008696037
+
+      import * as jose from "https://esm.run/jose@5.2.0";
+
+      function setupRemember(selector, key) {
+        const element = document.querySelector(selector);
+        element.value = localStorage.getItem(key);
+        element.addEventListener("input", () =>
+          localStorage.setItem(key, element.value)
+        );
+        return element;
+      }
+
+      const credsElem = setupRemember("#creds", "creds");
+      const scopesElem = setupRemember("#scopes", "scopes");
+      const jwtElem = setupRemember("#jwt", "jwt");
+      const accessTokenElem = setupRemember("#access-token", "accessToken");
+      const urlElem = setupRemember("#url", "url");
+
+      const logElem = document.querySelector("#log");
+      const log = (message) => {
+        logElem.innerHTML += message + "<br />";
+      };
+      log("hi :3");
+
+      const clearElem = document.querySelector("#clear");
+      clearElem.addEventListener("click", () => (logElem.innerHTML = ""));
+
+      const prettyJson = (json) => JSON.stringify(json, null, 2);
+
+      async function signJwt() {
+        // See:
+        //  - https://developers.google.com/identity/protocols/oauth2/service-account#httprest
+        //  - https://github.com/googleapis/google-auth-library-nodejs/blob/7282af878b9c5da17d00b23f99d2f60093b313fb/src/auth/jwtaccess.ts#L23
+        const alg = "RS256";
+        // See:
+        //  - https://developers.google.com/identity/protocols/oauth2/service-account#required-claims
+        //  - https://github.com/googleapis/google-auth-library-nodejs/blob/7282af878b9c5da17d00b23f99d2f60093b313fb/src/auth/jwtaccess.ts#L88-L166
+        const payload = {
+          // NOTE: In your code, you probably want to replace this with an array
+          // that you call `.join(" ")` on.
+          scope: scopesElem.value,
+        };
+        const creds = JSON.parse(credsElem.value);
+        // https://github.com/googleapis/google-auth-library-nodejs/blob/a4f9f9c65853a37e6e83861c5d22533dba774037/src/auth/jwtclient.ts#L191-L199
+        // See (RSA): https://github.com/panva/jose/blob/main/docs/classes/jwt_sign.SignJWT.md
+        const privateKey = await jose.importPKCS8(creds.private_key, alg);
+        log("Private key encoded.");
+        const jwt = await new jose.SignJWT(payload)
+          .setIssuer(creds.client_email)
+          .setAudience("https://oauth2.googleapis.com/token")
+          // Make the assertion expire in an hour. See:
+          // https://github.com/googleapis/google-auth-library-nodejs/blob/7282af878b9c5da17d00b23f99d2f60093b313fb/src/auth/jwtaccess.ts#L168-L177
+          .setExpirationTime("1h")
+          .setIssuedAt()
+          .setSubject(creds.client_email)
+          .setProtectedHeader({ alg })
+          .sign(privateKey);
+        log(`JWT signed.`);
+        jwtElem.value = jwt;
+        jwtElem.dispatchEvent(new Event("input"));
+      }
+
+      async function requestToken() {
+        const response = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: {},
+          body: new URLSearchParams({
+            grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            // NOTE: Replace this with the source of your generated JWT.
+            assertion: jwtElem.value,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(
+            `Error occurred while requesting access token: ${await response.text()}`
+          );
+        }
+        const json = await response.json();
+        log(`Successfully requested access token:\n${prettyJson(json)}`);
+        accessTokenElem.value = json.access_token;
+        accessTokenElem.dispatchEvent(new Event("input"));
+      }
+
+      async function makeRequest() {
+        fetch(urlElem.value, {
+          headers: {
+            Authorization: `Bearer ${accessTokenElem.value}`,
+          },
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            log(`Demo Request Response: ${prettyJson(data)}`);
+            // Handle the response data here
+          });
+      }
+
+      function setupEventListener(selector, type, listener) {
+        async function execListener(e) {
+          e.preventDefault();
+          try {
+            await listener(e);
+          } catch (e) {
+            log(e.stack);
+          }
+        }
+        const form = document.querySelector(selector);
+        form.addEventListener("submit", execListener, true);
+      }
+      setupEventListener("#creds-form", "submit", signJwt);
+      setupEventListener("#request-token-form", "submit", requestToken);
+      setupEventListener("#request-form", "submit", makeRequest);
+    </script>
+    <title>Google service account demo</title>
+  </head>
+  <body>
+    <h1>Google service account demo</h1>
+    <h2>Step 1: Generate and sign a JSON Web Token (JWT)</h2>
+    <form id="creds-form">
+      <label for="creds">
+        Service account credentials: (
+        <code><i>resource_name</i>-<i>service_account_key</i>.json</code>
+        )
+      </label>
+      <br />
+      <textarea
+        id="creds"
+        required
+        rows="11"
+        placeholder='{
+	"type": "service_account",
+	"project_id": "...",
+	"private_key_id": "...",
+	"private_key": "...",
+	"client_email": "...",
+	"client_id": "...",
+	"auth_uri": "https://accounts.google.com/o/oauth2/auth",
+	"token_uri": "https://oauth2.googleapis.com/token",
+	...
+}'
+      ></textarea>
+
+      <label for="scopes"> Space-delimited scope(s): </label>
+      <br />
+      <textarea
+        id="scopes"
+        required
+        rows="3"
+        placeholder="https://www.googleapis.com/..."
+      ></textarea>
+      <input type="submit" value="Generate + sign JWT" />
+    </form>
+    <h2>Step 2: Request an access token</h2>
+    <form id="request-token-form">
+      <label for="jwt"> Generated JWT: </label>
+      <input id="jwt" />
+      <input type="submit" value="Request access token" />
+    </form>
+    <h2>Step 3: Make your request!</h2>
+    <form id="request-form">
+      <label for="access-token"> Access token: </label>
+      <input id="access-token" />
+      <label for="url"> Resource URL: </label>
+      <input id="url" />
+      <input type="submit" value="GET resource" />
+    </form>
+    <h2>Log</h2>
+    <button id="clear">Clear log</button>
+    <pre id="log"></pre>
+  </body>
+</html>
